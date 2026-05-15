@@ -9,7 +9,7 @@ import os
 load_dotenv()
 
 ADB = "adb"
-DEVICE = "192.168.240.112:5555"
+DEVICE = os.getenv("DEVICE_ID")
 
 if not DEVICE:
     raise ValueError("DEVICE_ID not set — copy .env.example to .env and add your device ID")
