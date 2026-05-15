@@ -9,7 +9,7 @@ import os
 load_dotenv()
 
 ADB = "adb"
-DEVICE = os.getenv("DEVICE_ID")
+DEVICE = "192.168.240.112:5555"
 
 if not DEVICE:
     raise ValueError("DEVICE_ID not set — copy .env.example to .env and add your device ID")
@@ -24,13 +24,32 @@ def adb(cmd):
     )
 
 def screenshot():
+    # Execute with -p for PNG format
     result = adb(["exec-out", "screencap", "-p"])
+    
     if not result.stdout:
-        raise ConnectionError("ADB returned empty — check USB connection")
-    img_array = np.frombuffer(result.stdout, dtype=np.uint8)
+        raise ConnectionError("ADB returned empty — check USB connection or Waydroid status")
+
+    # PNG Magic Number: All valid PNGs start with these specific bytes
+    PNG_MAGIC = b'\x89PNG\r\n\x1a\n'
+    
+    # Locate the true start of the image data
+    start_index = result.stdout.find(PNG_MAGIC)
+    
+    if start_index == -1:
+        # Diagnostic: If no PNG header is found, check if ADB sent an error message instead
+        error_msg = result.stdout.decode(errors='ignore')[:100]
+        raise ConnectionError(f"Valid PNG header not found. ADB sent: {error_msg}")
+    
+    # Extract only the valid PNG data
+    clean_data = result.stdout[start_index:]
+    
+    img_array = np.frombuffer(clean_data, dtype=np.uint8)
     img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+    
     if img is None:
-        raise ConnectionError("Screenshot decoded as None")
+        raise ConnectionError("OpenCV failed to decode the binary buffer into an image")
+        
     return img
 
 def tap(x, y):
@@ -263,81 +282,165 @@ def visualize_edge(edge_points):
     cv2.imwrite("screenshots/edge_debug.png", screen)
     print(f"  → found {len(edge_points)} edge points")
 
+# --- CONFIGURATION ---
+# Map filenames to keys (ensure these are in your /templates folder)
+TROOP_TEMPLATES = {
+    "e_dragon": "templates/e_dragon.png",
+    "balloon": "templates/baloon.png",
+    "minion_prince": "templates/minion_prince.png",
+    "queen": "templates/queen.png",
+    "warden": "templates/warden.png",
+    "royal_champion": "templates/royal_champion.png",
+    "stone_slammer": "templates/stone_slamer.png"
+}
+
+# The order in which units are selected and dropped
+# Heroes first to tank, followed by main air force
+DEPLOYMENT_ORDER = [
+    "queen", 
+    "warden", 
+    "royal_champion", 
+    "stone_slammer",
+    "e_dragon", 
+    "balloon", 
+    "minion_prince"
+]
 
 def run_attack():
-    """Single full attack cycle"""
+    """Refactored attack cycle using new templates"""
 
-    # --- STATE 1: Home Village ---
-    print("\n[State 1] Tapping Attack...")
-    if not find_and_tap("templates/attack_btn.png"):
-        print("  → Attack button not found!")
-        return False
-    human_sleep(1.5, 3.0)  # ← was time.sleep(2)
+    # --- STATE 1-3: Navigation ---
+    print("\n[State 1-3] Navigating to battle...")
+    if not find_and_tap("templates/attack_btn.png"): return False
+    human_sleep(1.5, 3.0)
+    
+    if not find_and_tap("templates/find_match_btn.png"): return False
+    human_sleep(1.5, 3.0)
+    
+    if not find_and_tap("templates/confirm_attack_btn.png"): return False
+    human_sleep(6, 10) 
 
-    # --- STATE 2: Battle Menu ---
-    print("[State 2] Tapping Find a Match...")
-    if not find_and_tap("templates/find_match_btn.png"):
-        print("  → Find a Match not found!")
-        return False
-    human_sleep(1.5, 3.0)  # ← was time.sleep(2)
-
-    # --- STATE 3: Army Confirmation ---
-    print("[State 3] Confirming army...")
-    if not find_and_tap("templates/confirm_attack_btn.png"):
-        print("  → Confirm Attack not found!")
-        return False
-    human_sleep(6, 10)  # ← matchmaking wait, varied
-
-    # --- STATE 4: Enemy Base ---
-    print("[State 4] Normalizing view...")
+    # --- STATE 4: Deployment ---
+    print("[State 4] Normalizing view and detecting edge...")
     normalize_view()
-    human_sleep(0.8, 1.5)
-
-    print("[State 4] Detecting red zone edge...")
     edge_points = find_red_zone_edge()
-    print(f"  → {len(edge_points)} edge points found")
 
     if not edge_points:
-        print("  → no edge detected, tapping Next...")
-        find_and_tap("templates/next_btn.png")
+        print("  → No edge detected, looking for Next button...")
+        find_and_tap("templates/next_btn.png") # Uses your next_btn.png or next_text.png
         return False
 
     visualize_edge(edge_points)
+    
+    for unit in DEPLOYMENT_ORDER:
+        template_path = TROOP_TEMPLATES[unit]
+        print(f"[Deploy] Selecting {unit}...")
+        
+        if find_and_tap(template_path, threshold=0.75):
+            human_sleep(0.2, 0.5)
+            
+            # Use specific drop logic
+            if unit in ["queen", "warden", "royal_champion", "stone_slammer"]:
+                # Single units get focused drops
+                deploy_hero(template_path, edge_points, repeats=2)
+            else:
+                # Mass troops get clustered drops
+                deploy_clustered(edge_points, count=12, repeat=1)
+            
+            human_sleep(0.3, 0.7)
+        else:
+            print(f"  → {unit} icon not found, skipping.")
 
-    # Deploy dragons
-    print("[State 4] Deploying dragons...")
-    find_and_tap("templates/dragon_icon.png")
-    human_sleep(0.4, 0.8)
-    deploy_clustered(edge_points, count=12, repeat=2)
-    human_sleep(0.8, 1.5)
-
-    # Deploy heroes
-    print("[State 4] Deploying heroes...")
-    deploy_hero("templates/king_icon.png", edge_points, repeats=3)
-    human_sleep(0.4, 0.9)
-    deploy_hero("templates/queen_icon.png", edge_points, repeats=3)
-    human_sleep(0.4, 0.9)
-    deploy_hero("templates/warden_icon.png", edge_points, repeats=3)
-    human_sleep(0.5, 1.2)
-
-    # Wait for heroes to enter base then use abilities
-    print("[State 4] Waiting for heroes to enter base...")
-    human_sleep(5, 15)
+    # --- STATE 5-6: Battle Management ---
+    print("[State 5] Waiting for battle to finish...")
+    # Abilities check after 25 seconds
+    time.sleep(25) 
     use_hero_abilities(edge_points)
 
-    # --- STATE 5: Wait for battle ---
-    print("[State 5] Waiting for battle to finish...")
-    if not wait_for_template("templates/return_home_btn.png", timeout=240):
-        print("  → battle timed out")
+    if not wait_for_template("templates/return_home_btn.png", timeout=210):
+        print("  → Battle timed out")
         return False
 
-    # --- STATE 6: Results ---
-    print("[State 6] Tapping Return Home...")
-    human_sleep(0.5, 1.5)  # brief pause before tapping, like a human reading results
+    print("[State 6] Returning Home...")
     find_and_tap("templates/return_home_btn.png")
-    human_sleep(4, 7)  # wait for home village to load
-
+    human_sleep(4, 7)
     return True
+
+#
+# def run_attack():
+#     """Single full attack cycle"""
+#
+#     # --- STATE 1: Home Village ---
+#     print("\n[State 1] Tapping Attack...")
+#     if not find_and_tap("templates/attack_btn.png"):
+#         print("  → Attack button not found!")
+#         return False
+#     human_sleep(1.5, 3.0)  # ← was time.sleep(2)
+#
+#     # --- STATE 2: Battle Menu ---
+#     print("[State 2] Tapping Find a Match...")
+#     if not find_and_tap("templates/find_match_btn.png"):
+#         print("  → Find a Match not found!")
+#         return False
+#     human_sleep(1.5, 3.0)  # ← was time.sleep(2)
+#
+#     # --- STATE 3: Army Confirmation ---
+#     print("[State 3] Confirming army...")
+#     if not find_and_tap("templates/confirm_attack_btn.png"):
+#         print("  → Confirm Attack not found!")
+#         return False
+#     human_sleep(6, 10)  # ← matchmaking wait, varied
+#
+#     # --- STATE 4: Enemy Base ---
+#     print("[State 4] Normalizing view...")
+#     normalize_view()
+#     human_sleep(0.8, 1.5)
+#
+#     print("[State 4] Detecting red zone edge...")
+#     edge_points = find_red_zone_edge()
+#     print(f"  → {len(edge_points)} edge points found")
+#
+#     if not edge_points:
+#         print("  → no edge detected, tapping Next...")
+#         find_and_tap("templates/next_btn.png")
+#         return False
+#
+#     visualize_edge(edge_points)
+#
+#     # Deploy dragons
+#     print("[State 4] Deploying dragons...")
+#     find_and_tap("templates/dragon_icon.png")
+#     human_sleep(0.4, 0.8)
+#     deploy_clustered(edge_points, count=12, repeat=2)
+#     human_sleep(0.8, 1.5)
+#
+#     # Deploy heroes
+#     print("[State 4] Deploying heroes...")
+#     deploy_hero("templates/king_icon.png", edge_points, repeats=3)
+#     human_sleep(0.4, 0.9)
+#     deploy_hero("templates/queen_icon.png", edge_points, repeats=3)
+#     human_sleep(0.4, 0.9)
+#     deploy_hero("templates/warden_icon.png", edge_points, repeats=3)
+#     human_sleep(0.5, 1.2)
+#
+#     # Wait for heroes to enter base then use abilities
+#     print("[State 4] Waiting for heroes to enter base...")
+#     human_sleep(5, 15)
+#     use_hero_abilities(edge_points)
+#
+#     # --- STATE 5: Wait for battle ---
+#     print("[State 5] Waiting for battle to finish...")
+#     if not wait_for_template("templates/return_home_btn.png", timeout=240):
+#         print("  → battle timed out")
+#         return False
+#
+#     # --- STATE 6: Results ---
+#     print("[State 6] Tapping Return Home...")
+#     human_sleep(0.5, 1.5)  # brief pause before tapping, like a human reading results
+#     find_and_tap("templates/return_home_btn.png")
+#     human_sleep(4, 7)  # wait for home village to load
+#
+#     return True
 
 def idle_behavior():
     """
